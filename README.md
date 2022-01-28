@@ -1,2 +1,2 @@
 # seasaw
-A backend load balancer written 100% in Go
+A backend load balancer written in go, with servers provided with Flash
