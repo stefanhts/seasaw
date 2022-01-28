@@ -17,7 +17,7 @@ type Backend struct {
 	URL          *url.URL
 	Alive        bool
 	mux          sync.RWMutex
-	ReverseProxy httputil.ReverseProxy
+	ReverseProxy *httputil.ReverseProxy
 }
 
 type Servers struct {
@@ -29,11 +29,11 @@ const Attempts int = iota
 const Retry int = iota
 
 var ServerList = []string{
-	"localhost:5000",
-	"localhost:5001",
-	"localhost:5002",
-	"localhost:5003",
-	"localhost:5004",
+	"http://localhost:5000",
+	"http://localhost:5002",
+	"http://localhost:5003",
+	"http://localhost:5004",
+	"http://localhost:5005",
 }
 
 var serverPool Servers
@@ -52,8 +52,7 @@ func (s *Servers) MarkBackendStatus(url *url.URL, alive bool) {
 }
 
 func main() {
-	uri, _ := url.Parse("http://localhost:8080")
-	rp := httputil.NewSingleHostReverseProxy(uri)
+	uri, _ := url.Parse("http://127.0.0.1:8080")
 	port := 8080
 
 	server := http.Server{
@@ -61,29 +60,43 @@ func main() {
 		Addr:    fmt.Sprintf(":%d", port),
 	}
 
-	rp.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, err error) {
-		log.Printf("[%s] %s\n", uri.Host, err.Error())
-		retries := GetRetryFromContext(request)
-		// Attempt to connect to backend 3 times, if not successful, mark it as down
-		if retries < 3 {
-			select {
-			case <-time.After(10 * time.Millisecond):
-				cont := context.WithValue(request.Context(), Retry, retries+1)
-				rp.ServeHTTP(writer, request.WithContext(cont))
-			}
-			return
-		}
-		// mark backend as dead
-		serverPool.MarkBackendStatus(uri, false)
+	for _, str := range ServerList {
+		url, _ := url.Parse(str)
+		fmt.Printf("this is the str: %s, url:", str, url)
+		proxy := httputil.NewSingleHostReverseProxy(url)
 
-		attempts := GetAttempsFromContext(request)
-		log.Printf("%s(%s) Retrying connection attempt %4", request.URL.Path, attempts)
-		cont := context.WithValue(request.Context(), Retry, retries+1)
-		loadBalancer(writer, request.WithContext(cont))
+		proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, err error) {
+			log.Printf("[%s] %s\n", uri.Host, err.Error())
+			retries := GetRetryFromContext(request)
+			// Attempt to connect to backend 3 times, if not successful, mark it as down
+			if retries < 3 {
+				select {
+				case <-time.After(10 * time.Millisecond):
+					cont := context.WithValue(request.Context(), Retry, retries+1)
+					proxy.ServeHTTP(writer, request.WithContext(cont))
+				}
+				return
+			}
+			// mark backend as dead
+			serverPool.MarkBackendStatus(uri, false)
+
+			attempts := GetAttempsFromContext(request)
+			log.Printf("%s(%s) Retrying connection attempt %4", request.URL.Path, attempts)
+			cont := context.WithValue(request.Context(), Retry, retries+1)
+			loadBalancer(writer, request.WithContext(cont))
+		}
+		serverPool.AddServer(&Backend{
+			URL:          url,
+			Alive:        true,
+			ReverseProxy: proxy,
+		})
 	}
 	go healthCheck()
 
-	server.ListenAndServe()
+	log.Printf("Load Balancer started at: %d\n", port)
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func (s *Servers) NextIndex() int {
