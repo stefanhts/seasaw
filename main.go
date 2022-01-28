@@ -25,6 +25,10 @@ type Servers struct {
 	currentId uint64
 }
 
+type ConnectionWatcher struct {
+	connections int64
+}
+
 const Attempts int = iota
 const Retry int = iota
 
@@ -37,6 +41,20 @@ var ServerList = []string{
 }
 
 var serverPool Servers
+
+func (cw *ConnectionWatcher) OnStateChange(conn net.Conn, state http.ConnState) {
+	switch state {
+	case http.StateNew:
+		atomic.AddInt64(&cw.connections, 1)
+	case http.StateHijacked, http.StateClosed:
+		atomic.AddInt64(&cw.connections, -1)
+	}
+}
+
+func (cw *ConnectionWatcher) Count() int {
+	fmt.Printf("Total Connections: %d", &cw.connections)
+	return int(atomic.LoadInt64(&cw.connections))
+}
 
 func (s *Servers) AddServer(backend *Backend) {
 	s.backends = append(s.backends, backend)
@@ -55,14 +73,15 @@ func main() {
 	uri, _ := url.Parse("http://127.0.0.1:8080")
 	port := 8080
 
+	var cw ConnectionWatcher
 	server := http.Server{
-		Handler: http.HandlerFunc(loadBalancer),
-		Addr:    fmt.Sprintf(":%d", port),
+		ConnState: cw.OnStateChange,
+		Handler:   http.HandlerFunc(loadBalancer),
+		Addr:      fmt.Sprintf(":%d", port),
 	}
 
 	for _, str := range ServerList {
 		url, _ := url.Parse(str)
-		fmt.Printf("this is the str: %s, url:", str, url)
 		proxy := httputil.NewSingleHostReverseProxy(url)
 
 		proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, err error) {
@@ -80,7 +99,7 @@ func main() {
 			// mark backend as dead
 			serverPool.MarkBackendStatus(uri, false)
 
-			attempts := GetAttempsFromContext(request)
+			attempts := GetAttemptsFromContext(request)
 			log.Printf("%s(%s) Retrying connection attempt %4", request.URL.Path, attempts)
 			cont := context.WithValue(request.Context(), Retry, retries+1)
 			loadBalancer(writer, request.WithContext(cont))
@@ -93,7 +112,7 @@ func main() {
 	}
 	go healthCheck()
 
-	log.Printf("Load Balancer started at: %d\n", port)
+	log.Printf("Load Balancer started at port: %d\n", port)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
@@ -140,7 +159,7 @@ func GetRetryFromContext(r *http.Request) int {
 	return 0
 }
 
-func GetAttempsFromContext(r *http.Request) int {
+func GetAttemptsFromContext(r *http.Request) int {
 	if attempts, ok := r.Context().Value(Attempts).(int); ok {
 		return attempts
 	}
@@ -158,8 +177,10 @@ func loadBalancer(w http.ResponseWriter, r *http.Request) {
 
 func isServerAlive(url *url.URL) (alive bool) {
 	alive = false
-	connection, err := net.DialTimeout("tcp", url.String(), 2*time.Second)
+	connection, err := net.DialTimeout("tcp", url.String()[7:], 2*time.Second)
 	if err != nil {
+		log.Printf("Server: %s", url)
+		log.Print(err)
 		log.Printf("Server unreachable: %s", url.String())
 		return
 	}
