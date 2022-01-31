@@ -1,2 +1,2 @@
 # seesaw
-A backend load balancer written in Go, with servers provided with Flask
+A simple backendload balancer written in Go, with template servers provided using Flask
